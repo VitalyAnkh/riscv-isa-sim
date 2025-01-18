@@ -7,6 +7,7 @@
 #include "platform.h"
 #include "byteorder.h"
 #include "trap.h"
+#include "../riscv/common.h"
 #include <algorithm>
 #include <assert.h>
 #include <vector>
@@ -102,7 +103,7 @@ static void bad_address(const std::string& situation, reg_t addr)
   exit(-1);
 }
 
-std::map<std::string, uint64_t> htif_t::load_payload(const std::string& payload, reg_t* entry)
+std::map<std::string, uint64_t> htif_t::load_payload(const std::string& payload, reg_t* entry, reg_t load_offset)
 {
   std::string path;
   if (access(payload.c_str(), F_OK) == 0)
@@ -142,7 +143,7 @@ std::map<std::string, uint64_t> htif_t::load_payload(const std::string& payload,
   } preload_aware_memif(this);
 
   try {
-    return load_elf(path.c_str(), &preload_aware_memif, entry, expected_xlen);
+    return load_elf(path.c_str(), &preload_aware_memif, entry, load_offset, expected_xlen);
   } catch (mem_trap_t& t) {
     bad_address("loading payload " + payload, t.get_tval());
     abort();
@@ -151,7 +152,7 @@ std::map<std::string, uint64_t> htif_t::load_payload(const std::string& payload,
 
 void htif_t::load_program()
 {
-  std::map<std::string, uint64_t> symbols = load_payload(targs[0], &entry);
+  std::map<std::string, uint64_t> symbols = load_payload(targs[0], &entry, load_offset);
 
   if (symbols.count("tohost") && symbols.count("fromhost")) {
     tohost_addr = symbols["tohost"];
@@ -161,26 +162,39 @@ void htif_t::load_program()
   }
 
   // detect torture tests so we can print the memory signature at the end
-  if (symbols.count("begin_signature") && symbols.count("end_signature"))
-  {
+  if (symbols.count("begin_signature") && symbols.count("end_signature")) {
     sig_addr = symbols["begin_signature"];
     sig_len = symbols["end_signature"] - sig_addr;
   }
 
-  for (auto payload : payloads)
-  {
+  for (auto payload : payloads) {
     reg_t dummy_entry;
-    load_payload(payload, &dummy_entry);
+    load_payload(payload, &dummy_entry, 0);
   }
 
-   for (auto i : symbols)
-   {
-     auto it = addr2symbol.find(i.second);
-     if ( it == addr2symbol.end())
-       addr2symbol[i.second] = i.first;
-   }
+  class nop_memif_t : public memif_t {
+   public:
+    nop_memif_t(htif_t* htif) : memif_t(htif), htif(htif) {}
+    void read(addr_t UNUSED addr, size_t UNUSED len, void UNUSED *bytes) override {}
+    void write(addr_t UNUSED taddr, size_t UNUSED len, const void UNUSED *src) override {}
+   private:
+    htif_t* htif;
+  } nop_memif(this);
 
-   return;
+  reg_t nop_entry;
+  for (auto &s : symbol_elfs) {
+    std::map<std::string, uint64_t> other_symbols = load_elf(s.c_str(), &nop_memif, &nop_entry,
+                                                             expected_xlen);
+    symbols.merge(other_symbols);
+  }
+
+  for (auto i : symbols) {
+    auto it = addr2symbol.find(i.second);
+    if ( it == addr2symbol.end())
+      addr2symbol[i.second] = i.first;
+  }
+
+  return;
 }
 
 const char* htif_t::get_symbol(uint64_t addr)
@@ -239,7 +253,7 @@ int htif_t::run()
     std::bind(enq_func, &fromhost_queue, std::placeholders::_1);
 
   if (tohost_addr == 0) {
-    while (true)
+    while (!signal_exit)
       idle();
   }
 
@@ -327,7 +341,12 @@ void htif_t::parse_arguments(int argc, char ** argv)
         break;
       case HTIF_LONG_OPTIONS_OPTIND + 5:
         line_size = atoi(optarg);
-
+        break;
+      case HTIF_LONG_OPTIONS_OPTIND + 6:
+        targs.push_back(optarg);
+        break;
+      case HTIF_LONG_OPTIONS_OPTIND + 7:
+        symbol_elfs.push_back(optarg);
         break;
       case '?':
         if (!opterr)
@@ -363,9 +382,17 @@ void htif_t::parse_arguments(int argc, char ** argv)
           c = HTIF_LONG_OPTIONS_OPTIND + 4;
           optarg = optarg + 9;
         }
-        else if(arg.find("+signature-granularity=")==0){
-            c = HTIF_LONG_OPTIONS_OPTIND + 5;
-            optarg = optarg + 23;
+        else if (arg.find("+signature-granularity=") == 0) {
+          c = HTIF_LONG_OPTIONS_OPTIND + 5;
+          optarg = optarg + 23;
+        }
+	else if (arg.find("+target-argument=") == 0) {
+	  c = HTIF_LONG_OPTIONS_OPTIND + 6;
+	  optarg = optarg + 17;
+	}
+        else if (arg.find("+symbol-elf=") == 0) {
+          c = HTIF_LONG_OPTIONS_OPTIND + 7;
+          optarg = optarg + 12;
         }
         else if (arg.find("+permissive-off") == 0) {
           if (opterr)

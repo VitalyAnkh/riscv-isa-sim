@@ -21,13 +21,16 @@ class mmu_t;
 class remote_bitbang_t;
 class socketif_t;
 
+// Type for holding a pair of device factory and device specialization arguments.
+using device_factory_sargs_t = std::pair<const device_factory_t*, std::vector<std::string>>;
+
 // this class encapsulates the processors and memory in a RISC-V machine.
 class sim_t : public htif_t, public simif_t
 {
 public:
   sim_t(const cfg_t *cfg, bool halted,
-        std::vector<std::pair<reg_t, mem_t*>> mems,
-        std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices,
+        std::vector<std::pair<reg_t, abstract_mem_t*>> mems,
+        const std::vector<device_factory_sargs_t>& plugin_device_factories,
         const std::vector<std::string>& args,
         const debug_module_config_t &dm_config, const char *log_path,
         bool dtb_enabled, const char *dtb_file,
@@ -39,6 +42,7 @@ public:
   int run();
   void set_debug(bool value);
   void set_histogram(bool value);
+  void add_device(reg_t addr, std::shared_ptr<abstract_device_t> dev);
 
   // Configure logging
   //
@@ -52,30 +56,30 @@ public:
   }
   const char* get_dts() { return dts.c_str(); }
   processor_t* get_core(size_t i) { return procs.at(i); }
-  const cfg_t &get_cfg() { return *cfg; }
-  unsigned nprocs() const { return procs.size(); }
+  abstract_interrupt_controller_t* get_intctrl() const { assert(plic.get()); return plic.get(); }
+  virtual const cfg_t &get_cfg() const override { return *cfg; }
 
-  const std::map<size_t, processor_t*>& get_harts() { return harts; }
+  virtual const std::map<size_t, processor_t*>& get_harts() const override { return harts; }
 
   // Callback for processors to let the simulation know they were reset.
-  void proc_reset(unsigned id);
+  virtual void proc_reset(unsigned id) override;
+
+  static const size_t INTERLEAVE = 5000;
+  static const size_t INSNS_PER_RTC_TICK = 100; // 10 MHz clock for 1 BIPS core
+  static const size_t CPU_HZ = 1000000000; // 1GHz CPU
 
 private:
-  isa_parser_t isa;
   const cfg_t * const cfg;
-  std::vector<std::pair<reg_t, mem_t*>> mems;
-  std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices;
-  mmu_t* debug_mmu;  // debug port into main memory
+  std::vector<std::pair<reg_t, abstract_mem_t*>> mems;
   std::vector<processor_t*> procs;
   std::map<size_t, processor_t*> harts;
   std::pair<reg_t, reg_t> initrd_range;
   std::string dts;
   std::string dtb;
   bool dtb_enabled;
-  std::unique_ptr<rom_device_t> boot_rom;
-  std::unique_ptr<clint_t> clint;
-  std::unique_ptr<plic_t> plic;
-  std::unique_ptr<ns16550_t> ns16550;
+  std::vector<std::shared_ptr<abstract_device_t>> devices;
+  std::shared_ptr<clint_t> clint;
+  std::shared_ptr<plic_t> plic;
   bus_t bus;
   log_file_t log_file;
 
@@ -86,9 +90,6 @@ private:
 
   processor_t* get_core(const std::string& i);
   void step(size_t n); // step through simulation
-  static const size_t INTERLEAVE = 5000;
-  static const size_t INSNS_PER_RTC_TICK = 100; // 10 MHz clock for 1 BIPS core
-  static const size_t CPU_HZ = 1000000000; // 1GHz CPU
   size_t current_step;
   size_t current_proc;
   bool debug;
@@ -98,13 +99,12 @@ private:
   std::optional<std::function<void()>> next_interactive_action;
 
   // memory-mapped I/O routines
-  char* addr_to_mem(reg_t paddr);
-  bool mmio_load(reg_t paddr, size_t len, uint8_t* bytes);
-  bool mmio_store(reg_t paddr, size_t len, const uint8_t* bytes);
-  void make_dtb(const char* dtb_file);
+  virtual char* addr_to_mem(reg_t paddr) override;
+  virtual bool mmio_load(reg_t paddr, size_t len, uint8_t* bytes) override;
+  virtual bool mmio_store(reg_t paddr, size_t len, const uint8_t* bytes) override;
   void set_rom();
 
-  const char* get_symbol(uint64_t paddr);
+  virtual const char* get_symbol(uint64_t paddr) override;
 
   // presents a prompt for introspection into the simulation
   void interactive();
@@ -122,6 +122,7 @@ private:
   void interactive_fregs(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_fregd(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_pc(const std::string& cmd, const std::vector<std::string>& args);
+  void interactive_insn(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_priv(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_mem(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_str(const std::string& cmd, const std::vector<std::string>& args);
@@ -135,19 +136,19 @@ private:
   freg_t get_freg(const std::vector<std::string>& args, int size);
   reg_t get_mem(const std::vector<std::string>& args);
   reg_t get_pc(const std::vector<std::string>& args);
+  reg_t get_insn(const std::vector<std::string>& args);
 
   friend class processor_t;
   friend class mmu_t;
-  friend class debug_module_t;
 
   // htif
-  void reset();
-  void idle();
-  void read_chunk(addr_t taddr, size_t len, void* dst);
-  void write_chunk(addr_t taddr, size_t len, const void* src);
-  size_t chunk_align() { return 8; }
-  size_t chunk_max_size() { return 8; }
-  endianness_t get_target_endianness() const;
+  virtual void reset() override;
+  virtual void idle() override;
+  virtual void read_chunk(addr_t taddr, size_t len, void* dst) override;
+  virtual void write_chunk(addr_t taddr, size_t len, const void* src) override;
+  virtual size_t chunk_align() override { return 8; }
+  virtual size_t chunk_max_size() override { return 8; }
+  virtual endianness_t get_target_endianness() const override;
 
 public:
   // Initialize this after procs, because in debug_module_t::reset() we

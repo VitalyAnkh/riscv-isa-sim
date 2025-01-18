@@ -7,6 +7,7 @@
 #include "syscall.h"
 #include "device.h"
 #include "byteorder.h"
+#include "../riscv/platform.h"
 #include <string.h>
 #include <map>
 #include <vector>
@@ -58,11 +59,13 @@ class htif_t : public chunked_memif_t
   virtual size_t chunk_align() = 0;
   virtual size_t chunk_max_size() = 0;
 
-  virtual std::map<std::string, uint64_t> load_payload(const std::string& payload, reg_t* entry);
+  virtual std::map<std::string, uint64_t> load_payload(const std::string& payload, reg_t* entry,
+                                                       reg_t load_addr);
   virtual void load_program();
   virtual void idle() {}
 
   const std::vector<std::string>& host_args() { return hargs; }
+  const std::vector<std::string>& target_args() { return targs; }
 
   reg_t get_entry_point() { return entry; }
 
@@ -78,6 +81,7 @@ class htif_t : public chunked_memif_t
   void register_devices();
   void usage(const char * program_name);
   unsigned int expected_xlen = 0;
+  const reg_t load_offset = DRAM_BASE;
   memif_t mem;
   reg_t entry;
   bool writezeros;
@@ -98,8 +102,7 @@ class htif_t : public chunked_memif_t
   std::vector<device_t*> dynamic_devices;
   std::vector<std::string> payloads;
 
-  const std::vector<std::string>& target_args() { return targs; }
-
+  std::vector<std::string> symbol_elfs;
   std::map<uint64_t, std::string> addr2symbol;
 
   friend class memif_t;
@@ -128,6 +131,8 @@ class htif_t : public chunked_memif_t
        +chroot=PATH\n\
       --payload=PATH       Load PATH memory as an additional ELF payload\n\
        +payload=PATH\n\
+      --symbol-elf=PATH    Populate the symbol table with the ELF file at PATH\n\
+       +symbol-elf=PATH\n\
 \n\
 HOST OPTIONS (currently unsupported)\n\
       --disk=DISK          Add DISK device. Use a ramdisk since this isn't\n\
@@ -145,7 +150,9 @@ TARGET (RISC-V BINARY) OPTIONS\n\
 {"signature", required_argument, 0, HTIF_LONG_OPTIONS_OPTIND + 2 },     \
 {"chroot",    required_argument, 0, HTIF_LONG_OPTIONS_OPTIND + 3 },     \
 {"payload",   required_argument, 0, HTIF_LONG_OPTIONS_OPTIND + 4 },     \
-{"signature-granularity",    optional_argument, 0, HTIF_LONG_OPTIONS_OPTIND + 5 },     \
+{"signature-granularity",    required_argument, 0, HTIF_LONG_OPTIONS_OPTIND + 5 },     \
+{"target-argument",          required_argument, 0, HTIF_LONG_OPTIONS_OPTIND + 6 },     \
+{"symbol-elf",               required_argument, 0, HTIF_LONG_OPTIONS_OPTIND + 7 },     \
 {0, 0, 0, 0}
 
 #endif // __HTIF_H
